@@ -165,7 +165,7 @@ class SpotTeleop(Teleoperator):
             # x is Godot Y
             action[0]= linear_movement[1]
             if abs(linear_movement[0])>0.5:
-                action[1]= -linear_movement[0]
+                action[1]= -0.5*linear_movement[0]
             action_dict["x_axis.vel"] = action[0]
             action_dict["y_axis.vel"] = action[1]
         
@@ -179,52 +179,47 @@ class SpotTeleop(Teleoperator):
             if formated_data_right["btn_ax"]:
                 # get controller pos
                 curr_pos = np.array(formated_data_right["pos"])
-                curr_quat = np.array(formated_data_right["quat"]) 
+                curr_quat = np.array(formated_data_right["quat"])
+
+                curr_vr_rot_raw = R.from_quat(curr_quat)
+                vr_rot_vec = curr_vr_rot_raw.as_rotvec()
+
+                # Dein verifiziertes Remapping (X_s = -Z_g, Y_s = -X_g, Z_s = Y_g)
+                remap_vr_curr_vec = np.array([
+                    -vr_rot_vec[2], # Spot X
+                    -vr_rot_vec[0], # Spot Y
+                    vr_rot_vec[1]  # Spot Z
+                ])
+                remap_vr_curr_obj = R.from_rotvec(remap_vr_curr_vec) 
                 # check if button pressed
                 if not self.button_already_pressed:
-                    self.last_pos = curr_pos
-                    self.last_rot = R.from_quat(curr_quat)
-                    # save current state
+                    # safe controller and robot pos as reference
                     self.pos_when_triggered = curr_pos
-                    self.rot_when_triggered = R.from_quat(curr_quat)
-
-                    self.robot_pos_at_trigger = np.array([body_tform_hand.x, body_tform_hand.y, body_tform_hand.z])
                     self.robot_rot_at_trigger = R.from_quat(curr_hand_quat)
-                    # set button state
-                    self.button_already_pressed = True                
+                    self.robot_pos_at_trigger = np.array([body_tform_hand.x, body_tform_hand.y, body_tform_hand.z])
+                    # save controller and robot offset to keep control axis
+                    # when the arm is rotated
+                    self.rot_offset = self.robot_rot_at_trigger * remap_vr_curr_obj.inv()                    
+                    # button state
+                    self.button_already_pressed = True
                 else:
+                    # calcuate movement based on the reference
                     delta_pos_abs = curr_pos - self.pos_when_triggered
-
                     remap_pos_abs = np.array([-delta_pos_abs[2], -delta_pos_abs[0], delta_pos_abs[1]])
-
-                    curr_rot_obj = R.from_quat(curr_quat)
-                    delta_rot_obj_abs = curr_rot_obj * self.rot_when_triggered.inv()
-                    delta_rot_vec_abs = delta_rot_obj_abs.as_rotvec()                
-                    remap_rot_abs = np.array([
-                        -delta_rot_vec_abs[2], # Spot X component
-                        -delta_rot_vec_abs[0], # Spot Y component
-                        delta_rot_vec_abs[1]  # Spot Z component
-                        ])
-                    remap_delta_rot_obj_abs = R.from_rotvec(remap_rot_abs)
-                    
-                     # --- FINAL CALCULATION: Add Delta to Trigger Pose ---
                     target_pos_abs = self.robot_pos_at_trigger + remap_pos_abs
-                    target_rot_obj = remap_delta_rot_obj_abs * self.robot_rot_at_trigger
+                    # map rotation to offset
+                    target_rot_obj = self.rot_offset * remap_vr_curr_obj
+                    # fit datatype
                     target_rpy_abs = target_rot_obj.as_euler('xyz', degrees=False)
-                    
 
-                    # Update dictionary with absolute targets
-                    action_dict["arm_control"]    = True
-                    action_dict["arm.x"]    = target_pos_abs[0]
-                    action_dict["arm.y"]    = target_pos_abs[1]
-                    action_dict["arm.z"]    = target_pos_abs[2]
-                    action_dict["arm.roll"] = target_rpy_abs[0]
-                    action_dict["arm.pitch"]= target_rpy_abs[1]
-                    action_dict["arm.yaw"]  = target_rpy_abs[2]
-
-                    # Maintain history for next delta
-                    self.last_pos = curr_pos
-                    self.last_rot = curr_rot_obj               
+                    # set action dict
+                    action_dict["arm_control"] = True
+                    action_dict["arm.x"]     = target_pos_abs[0]
+                    action_dict["arm.y"]     = target_pos_abs[1]
+                    action_dict["arm.z"]     = target_pos_abs[2]
+                    action_dict["arm.roll"]  = target_rpy_abs[0]
+                    action_dict["arm.pitch"] = target_rpy_abs[1]
+                    action_dict["arm.yaw"]   = target_rpy_abs[2]         
             else:
                 # reset button state
                 self.button_already_pressed = False
