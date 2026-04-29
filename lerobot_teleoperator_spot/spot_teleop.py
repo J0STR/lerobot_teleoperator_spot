@@ -3,10 +3,24 @@ import time
 import socket
 import numpy as np
 import json
+from scipy.spatial.transform import Rotation as R
 
 from lerobot.teleoperators.teleoperator import Teleoperator
 
-from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
+import bosdyn.client
+import bosdyn.client.lease
+from bosdyn.client.lease import LeaseClient
+import bosdyn.client.util
+import bosdyn.geometry
+from bosdyn.api import geometry_pb2
+from bosdyn.api import trajectory_pb2
+from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
+from bosdyn.client import math_helpers
+from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME,ODOM_FRAME_NAME, get_a_tform_b
+from bosdyn.client.image import ImageClient
+from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient, blocking_stand
+from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.util import seconds_to_duration
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +51,27 @@ class SpotTeleop(Teleoperator):
         self.sock_right.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock_right.bind((self.config.local_host, int(self.config.port_controller_right)))
         self.sock_right.setblocking(False)
+        # arm movement
+        bosdyn.client.util.setup_logging()
+        self._sdk = bosdyn.client.create_standard_sdk('Spot_LeRobot_Robot')
+        self.robot = self._sdk.create_robot(self.config.robot_ip)
+        self.robot.authenticate(self.config.robot_user,
+                                  self.config.robot_password)
+        bosdyn.client.util.authenticate(self.robot)
+        self.robot_state_client: RobotStateClient = self.robot.ensure_client(RobotStateClient.default_service_name)
+        self.robot_state = self.robot_state_client.get_robot_state()
+        ## vars for arm movement
+        self.last_pos = np.array([0.0, 0.0, 0.0])
+        self.last_rot = R.from_quat([0.0, 0.0, 0.0, 1.0]) # identity quaternion
+        self.pos_when_triggered = np.array([0.0, 0.0, 0.0])
+        self.rot_when_triggered = R.from_quat([0.0, 0.0, 0.0, 1.0])
+        self.robot_pos_at_trigger = None
+        self.robot_rot_at_trigger = None
+        self.button_already_pressed = False
+        self.rot_offset = None
+        ## vars for gripper
+        self.gripper_pos = 0.0 
+        self.gripper_speed = 0.02
 
 
     @property
@@ -45,6 +80,14 @@ class SpotTeleop(Teleoperator):
             "x_axis.vel": float,
             "y_axis.vel": float,
             "rotation.vel": float,
+            "arm_control": bool,
+            "arm.x": float,
+            "arm.y": float,
+            "arm.z": float,
+            "arm.roll": float,
+            "arm.pitch": float,
+            "arm.yaw": float,
+            "gripper.action": float,
         }
 
     @property
@@ -76,11 +119,29 @@ class SpotTeleop(Teleoperator):
     def get_action(self) -> dict[str, float]:
         start = time.perf_counter()
 
-        action_dict = {}
         action = np.array([0.,0.,0.])
-        action_dict["x_axis.vel"] = action[0]
-        action_dict["y_axis.vel"] = action[1]
-        action_dict["rotation.vel"] = action[2]
+        robot_state = self.robot_state_client.get_robot_state()
+        body_tform_hand = get_a_tform_b(
+            robot_state.kinematic_state.transforms_snapshot,
+            GRAV_ALIGNED_BODY_FRAME_NAME,
+            HAND_FRAME_NAME
+        )
+        curr_hand_quat = [body_tform_hand.rot.x, body_tform_hand.rot.y, body_tform_hand.rot.z, body_tform_hand.rot.w]
+        curr_rpy = R.from_quat(curr_hand_quat).as_euler('xyz', degrees=False)
+
+        action_dict = {
+            "x_axis.vel": 0.0,
+            "y_axis.vel": 0.0,
+            "rotation.vel": 0.0,
+            "arm_control": False,
+            "arm.x": 0.3,
+            "arm.y": 0.0,
+            "arm.z": 0.0,
+            "arm.roll": 0.0,
+            "arm.pitch": 0.0,
+            "arm.yaw": 0.0,
+            "gripper.action": self.gripper_pos,
+        }
 
         # Drain buffers to get latest data
         latest_data_bytes_left , latest_data_bytes_right = self.drain_buffers()
@@ -101,15 +162,84 @@ class SpotTeleop(Teleoperator):
         # process data and get action 
         if formated_data_left is not None:
             linear_movement = formated_data_left['stick']
+            # x is Godot Y
             action[0]= linear_movement[1]
             if abs(linear_movement[0])>0.5:
                 action[1]= -linear_movement[0]
             action_dict["x_axis.vel"] = action[0]
             action_dict["y_axis.vel"] = action[1]
+        
+        # rotation movement
         if formated_data_right is not None:
             rotation = formated_data_right['stick']
             action[2] = rotation[1]
-            action_dict["rotation.vel"] = action[2]     
+            action_dict["rotation.vel"] = action[2]
+
+            # arm movement
+            if formated_data_right["btn_ax"]:
+                # get controller pos
+                curr_pos = np.array(formated_data_right["pos"])
+                curr_quat = np.array(formated_data_right["quat"]) 
+                # check if button pressed
+                if not self.button_already_pressed:
+                    self.last_pos = curr_pos
+                    self.last_rot = R.from_quat(curr_quat)
+                    # save current state
+                    self.pos_when_triggered = curr_pos
+                    self.rot_when_triggered = R.from_quat(curr_quat)
+
+                    self.robot_pos_at_trigger = np.array([body_tform_hand.x, body_tform_hand.y, body_tform_hand.z])
+                    self.robot_rot_at_trigger = R.from_quat(curr_hand_quat)
+                    # set button state
+                    self.button_already_pressed = True                
+                else:
+                    delta_pos_abs = curr_pos - self.pos_when_triggered
+
+                    remap_pos_abs = np.array([-delta_pos_abs[2], -delta_pos_abs[0], delta_pos_abs[1]])
+
+                    curr_rot_obj = R.from_quat(curr_quat)
+                    delta_rot_obj_abs = curr_rot_obj * self.rot_when_triggered.inv()
+                    delta_rot_vec_abs = delta_rot_obj_abs.as_rotvec()                
+                    remap_rot_abs = np.array([
+                        -delta_rot_vec_abs[2], # Spot X component
+                        -delta_rot_vec_abs[0], # Spot Y component
+                        delta_rot_vec_abs[1]  # Spot Z component
+                        ])
+                    remap_delta_rot_obj_abs = R.from_rotvec(remap_rot_abs)
+                    
+                     # --- FINAL CALCULATION: Add Delta to Trigger Pose ---
+                    target_pos_abs = self.robot_pos_at_trigger + remap_pos_abs
+                    target_rot_obj = remap_delta_rot_obj_abs * self.robot_rot_at_trigger
+                    target_rpy_abs = target_rot_obj.as_euler('xyz', degrees=False)
+                    
+
+                    # Update dictionary with absolute targets
+                    action_dict["arm_control"]    = True
+                    action_dict["arm.x"]    = target_pos_abs[0]
+                    action_dict["arm.y"]    = target_pos_abs[1]
+                    action_dict["arm.z"]    = target_pos_abs[2]
+                    action_dict["arm.roll"] = target_rpy_abs[0]
+                    action_dict["arm.pitch"]= target_rpy_abs[1]
+                    action_dict["arm.yaw"]  = target_rpy_abs[2]
+
+                    # Maintain history for next delta
+                    self.last_pos = curr_pos
+                    self.last_rot = curr_rot_obj               
+            else:
+                # reset button state
+                self.button_already_pressed = False
+
+            if formated_data_right['trigger']:
+                # close gripper step wise
+                self.gripper_pos -= self.gripper_speed
+            
+            # open gripper
+            if formated_data_right['grip']:
+                # open gripper stepwise
+                self.gripper_pos += self.gripper_speed
+
+            self.gripper_pos = float(np.clip(self.gripper_pos, 0.0, 1.0))
+            action_dict["gripper.action"] = self.gripper_pos
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
