@@ -24,3 +24,19 @@ Right VR Controller:
 Left VR Controller:
 - Press A + Controller Movement --> Arm Movement
 - Triggers open and close the Gripper
+
+## Install
+
+Clone Repository in LeRobot-Workspace.
+
+Move into the folder:
+
+```bash
+cd lerobot_teleoperator_spot
+```
+
+Install:
+
+```bash
+pip install e .
+```
