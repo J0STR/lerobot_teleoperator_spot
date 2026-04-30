@@ -8,19 +8,9 @@ from scipy.spatial.transform import Rotation as R
 from lerobot.teleoperators.teleoperator import Teleoperator
 
 import bosdyn.client
-import bosdyn.client.lease
-from bosdyn.client.lease import LeaseClient
 import bosdyn.client.util
-import bosdyn.geometry
-from bosdyn.api import geometry_pb2
-from bosdyn.api import trajectory_pb2
-from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
-from bosdyn.client import math_helpers
-from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME,ODOM_FRAME_NAME, get_a_tform_b
-from bosdyn.client.image import ImageClient
-from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient, blocking_stand
+from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME, get_a_tform_b
 from bosdyn.client.robot_state import RobotStateClient
-from bosdyn.util import seconds_to_duration
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +51,6 @@ class SpotTeleop(Teleoperator):
         self.robot_state_client: RobotStateClient = self.robot.ensure_client(RobotStateClient.default_service_name)
         self.robot_state = self.robot_state_client.get_robot_state()
         ## vars for arm movement
-        self.last_pos = np.array([0.0, 0.0, 0.0])
-        self.last_rot = R.from_quat([0.0, 0.0, 0.0, 1.0]) # identity quaternion
         self.pos_when_triggered = np.array([0.0, 0.0, 0.0])
         self.rot_when_triggered = R.from_quat([0.0, 0.0, 0.0, 1.0])
         self.robot_pos_at_trigger = None
@@ -169,7 +157,7 @@ class SpotTeleop(Teleoperator):
             action_dict["x_axis.vel"] = action[0]
             action_dict["y_axis.vel"] = action[1]
         
-        # rotation movement
+        # base rotation movement
         if formated_data_right is not None:
             rotation = formated_data_right['stick']
             action[2] = rotation[1]
@@ -183,14 +171,13 @@ class SpotTeleop(Teleoperator):
 
                 curr_vr_rot_raw = R.from_quat(curr_quat)
                 vr_rot_vec = curr_vr_rot_raw.as_rotvec()
-
-                # Dein verifiziertes Remapping (X_s = -Z_g, Y_s = -X_g, Z_s = Y_g)
                 remap_vr_curr_vec = np.array([
                     -vr_rot_vec[2], # Spot X
                     -vr_rot_vec[0], # Spot Y
                     vr_rot_vec[1]  # Spot Z
                 ])
                 remap_vr_curr_obj = R.from_rotvec(remap_vr_curr_vec) 
+                
                 # check if button pressed
                 if not self.button_already_pressed:
                     # safe controller and robot pos as reference
