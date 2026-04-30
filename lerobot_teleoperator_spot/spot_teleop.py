@@ -115,7 +115,6 @@ class SpotTeleop(Teleoperator):
             HAND_FRAME_NAME
         )
         curr_hand_quat = [body_tform_hand.rot.x, body_tform_hand.rot.y, body_tform_hand.rot.z, body_tform_hand.rot.w]
-        curr_rpy = R.from_quat(curr_hand_quat).as_euler('xyz', degrees=False)
 
         action_dict = {
             "x_axis.vel": 0.0,
