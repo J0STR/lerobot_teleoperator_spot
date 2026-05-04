@@ -69,6 +69,7 @@ class SpotTeleop(Teleoperator):
             "y_axis.vel": float,
             "rotation.vel": float,
             "arm_control": bool,
+            "arm_carry_enabled": bool,
             "arm.x": float,
             "arm.y": float,
             "arm.z": float,
@@ -121,6 +122,7 @@ class SpotTeleop(Teleoperator):
             "y_axis.vel": 0.0,
             "rotation.vel": 0.0,
             "arm_control": False,
+            "arm_carry_enabled": False,
             "arm.x": 0.3,
             "arm.y": 0.0,
             "arm.z": 0.0,
@@ -161,6 +163,9 @@ class SpotTeleop(Teleoperator):
             rotation = formated_data_right['stick']
             action[2] = rotation[1]
             action_dict["rotation.vel"] = action[2]
+
+            if formated_data_right["btn_by"]:
+                action_dict['arm_carry_enabled'] = True
 
             # arm movement
             if formated_data_right["btn_ax"]:
