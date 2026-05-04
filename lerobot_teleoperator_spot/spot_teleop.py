@@ -65,18 +65,19 @@ class SpotTeleop(Teleoperator):
     @property
     def action_features(self) -> dict[str, type]:
         return {
-            "x_axis.vel": float,
-            "y_axis.vel": float,
-            "rotation.vel": float,
-            "arm_control": bool,
-            "arm_carry_enabled": bool,
+            "base.x.vel": float,
+            "base.x.vel": float,
+            "base.rot.vel": float,            
             "arm.x": float,
             "arm.y": float,
             "arm.z": float,
-            "arm.roll": float,
-            "arm.pitch": float,
-            "arm.yaw": float,
-            "gripper.action": float,
+            "arm.rot.w": float,
+            "arm.rot.x": float,
+            "arm.rot.y": float,
+            "arm.rot.z": float,
+            "gripper.pos": float,
+            "arm_control": bool,
+            "arm_carry_enabled": bool,
         }
 
     @property
@@ -118,18 +119,19 @@ class SpotTeleop(Teleoperator):
         curr_hand_quat = [body_tform_hand.rot.x, body_tform_hand.rot.y, body_tform_hand.rot.z, body_tform_hand.rot.w]
 
         action_dict = {
-            "x_axis.vel": 0.0,
-            "y_axis.vel": 0.0,
-            "rotation.vel": 0.0,
+            "base.x.vel": 0.0,
+            "base.y.vel": 0.0,
+            "base.rot.vel": 0.0,
             "arm_control": False,
             "arm_carry_enabled": False,
-            "arm.x": 0.3,
+            "arm.x": 0.3, # Default reach
             "arm.y": 0.0,
             "arm.z": 0.0,
-            "arm.roll": 0.0,
-            "arm.pitch": 0.0,
-            "arm.yaw": 0.0,
-            "gripper.action": self.gripper_pos,
+            "arm.rot.w": 1.0,
+            "arm.rot.x": 0.0,
+            "arm.rot.y": 0.0,
+            "arm.rot.z": 0.0,
+            "gripper.pos": self.gripper_pos,
         }
 
         # Drain buffers to get latest data
@@ -150,19 +152,16 @@ class SpotTeleop(Teleoperator):
 
         # process data and get action 
         if formated_data_left is not None:
-            linear_movement = formated_data_left['stick']
+            stick = formated_data_left.get('stick', [0, 0])
             # x is Godot Y
-            action[0]= linear_movement[1]
-            if abs(linear_movement[0])>0.5:
-                action[1]= -0.5*linear_movement[0]
-            action_dict["x_axis.vel"] = action[0]
-            action_dict["y_axis.vel"] = action[1]
+            action_dict["base.x.vel"] = stick[1] # Forward/Backward
+            if abs(stick[0]) > 0.5:
+                action_dict["base.y.vel"] = -0.5 * stick[0]
         
         # base rotation movement
         if formated_data_right is not None:
-            rotation = formated_data_right['stick']
-            action[2] = rotation[1]
-            action_dict["rotation.vel"] = action[2]
+            stick_right = formated_data_right.get('stick', [0, 0])
+            action_dict["base.rot.vel"] = stick_right[1]
 
             if formated_data_right["btn_by"]:
                 action_dict['arm_carry_enabled'] = True
@@ -198,19 +197,18 @@ class SpotTeleop(Teleoperator):
                     delta_pos_abs = curr_pos - self.pos_when_triggered
                     remap_pos_abs = np.array([-delta_pos_abs[2], -delta_pos_abs[0], delta_pos_abs[1]])
                     target_pos_abs = self.robot_pos_at_trigger + remap_pos_abs
-                    # map rotation to offset
                     target_rot_obj = self.rot_offset * remap_vr_curr_obj
-                    # fit datatype
-                    target_rpy_abs = target_rot_obj.as_euler('xyz', degrees=False)
+                    target_quat = target_rot_obj.as_quat() # returns [x, y, z, w]
 
-                    # set action dict
                     action_dict["arm_control"] = True
-                    action_dict["arm.x"]     = target_pos_abs[0]
-                    action_dict["arm.y"]     = target_pos_abs[1]
-                    action_dict["arm.z"]     = target_pos_abs[2]
-                    action_dict["arm.roll"]  = target_rpy_abs[0]
-                    action_dict["arm.pitch"] = target_rpy_abs[1]
-                    action_dict["arm.yaw"]   = target_rpy_abs[2]         
+                    action_dict["arm.x"] = target_pos_abs[0]
+                    action_dict["arm.y"] = target_pos_abs[1]
+                    action_dict["arm.z"] = target_pos_abs[2]
+                    
+                    action_dict["arm.rot.x"] = target_quat[0]
+                    action_dict["arm.rot.y"] = target_quat[1]
+                    action_dict["arm.rot.z"] = target_quat[2]
+                    action_dict["arm.rot.w"] = target_quat[3]       
             else:
                 # reset button state
                 self.button_already_pressed = False
@@ -225,7 +223,7 @@ class SpotTeleop(Teleoperator):
                 self.gripper_pos += self.gripper_speed
 
             self.gripper_pos = float(np.clip(self.gripper_pos, 0.0, 1.0))
-            action_dict["gripper.action"] = self.gripper_pos
+            action_dict["gripper.pos"] = self.gripper_pos
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
