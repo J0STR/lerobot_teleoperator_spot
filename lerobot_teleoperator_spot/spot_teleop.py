@@ -9,8 +9,12 @@ from lerobot.teleoperators.teleoperator import Teleoperator
 
 import bosdyn.client
 import bosdyn.client.util
-from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME, get_a_tform_b
+from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME,ODOM_FRAME_NAME, HAND_FRAME_NAME, get_a_tform_b
 from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.client.inverse_kinematics import InverseKinematicsClient
+from bosdyn.api.spot.inverse_kinematics_pb2 import (InverseKinematicsRequest,
+                                                    InverseKinematicsResponse)
+from bosdyn.client.math_helpers import SE3Pose, Quat
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,7 @@ class SpotTeleop(Teleoperator):
                                   self.config.robot_password)
         bosdyn.client.util.authenticate(self.robot)
         self.robot_state_client: RobotStateClient = self.robot.ensure_client(RobotStateClient.default_service_name)
+        self.ik_client: InverseKinematicsClient = self.robot.ensure_client(InverseKinematicsClient.default_service_name)
         self.robot_state = self.robot_state_client.get_robot_state()
         ## vars for arm movement
         self.pos_when_triggered = np.array([0.0, 0.0, 0.0])
@@ -109,10 +114,9 @@ class SpotTeleop(Teleoperator):
     def get_action(self) -> dict[str, float]:
         start = time.perf_counter()
 
-        action = np.array([0.,0.,0.])
-        robot_state = self.robot_state_client.get_robot_state()
+        self.robot_state = self.robot_state_client.get_robot_state()
         body_tform_hand = get_a_tform_b(
-            robot_state.kinematic_state.transforms_snapshot,
+            self.robot_state.kinematic_state.transforms_snapshot,
             GRAV_ALIGNED_BODY_FRAME_NAME,
             HAND_FRAME_NAME
         )
@@ -124,13 +128,13 @@ class SpotTeleop(Teleoperator):
             "base.rot.vel": 0.0,
             "arm_control": False,
             "arm_carry_enabled": False,
-            "arm.x": 0.3, # Default reach
-            "arm.y": 0.0,
-            "arm.z": 0.0,
-            "arm.rot.w": 1.0,
-            "arm.rot.x": 0.0,
-            "arm.rot.y": 0.0,
-            "arm.rot.z": 0.0,
+            "arm.x": body_tform_hand.x, # Default reach
+            "arm.y": body_tform_hand.y,
+            "arm.z": body_tform_hand.z,
+            "arm.rot.w": body_tform_hand.rot.w,
+            "arm.rot.x": body_tform_hand.rot.x,
+            "arm.rot.y": body_tform_hand.rot.y,
+            "arm.rot.z": body_tform_hand.rot.z,
             "gripper.pos": self.gripper_pos,
         }
 
@@ -200,6 +204,14 @@ class SpotTeleop(Teleoperator):
                     target_rot_obj = self.rot_offset * remap_vr_curr_obj
                     target_quat = target_rot_obj.as_quat() # returns [x, y, z, w]
 
+                    ik_joints = self.get_joints_from_pose(
+                        target_pos_abs[0], target_pos_abs[1], target_pos_abs[2],
+                        target_quat[3], target_quat[0], target_quat[1], target_quat[2]
+                    )
+                    if ik_joints:
+                        for i, val in enumerate(ik_joints):
+                            action_dict[f"arm.joint{i+1}.pos"] = val
+
                     action_dict["arm_control"] = True
                     action_dict["arm.x"] = target_pos_abs[0]
                     action_dict["arm.y"] = target_pos_abs[1]
@@ -246,6 +258,53 @@ class SpotTeleop(Teleoperator):
                 break
 
         return latest_data_bytes_left, latest_data_bytes_right
+    
+    def get_joints_from_pose(self, x, y, z, rw, rx, ry, rz):
+        snapshot = self.robot_state.kinematic_state.transforms_snapshot
+        odom_T_body = get_a_tform_b(snapshot, ODOM_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
+
+        # 2. Define the target tool pose relative to the BODY (from your VR math)
+        body_T_tool = SE3Pose(x, y, z, Quat(w=rw, x=rx, y=ry, z=rz))
+
+        # 3. Transform the target tool pose into the ODOM frame
+        odom_T_tool = odom_T_body * body_T_tool
+
+        # 4. Build the request with ODOM as the root
+        request = InverseKinematicsRequest(
+            root_frame_name=ODOM_FRAME_NAME,
+            tool_pose_task=InverseKinematicsRequest.ToolPoseTask(
+                task_tform_desired_tool=odom_T_tool.to_proto()
+            )
+        )
+        
+        # Call the service
+        try:
+            response = self.ik_client.inverse_kinematics(request)
+            
+            if response.status == InverseKinematicsResponse.STATUS_OK:
+                joint_states = response.robot_configuration.joint_states
+    
+                # 1. Filter for all arm-related joints
+                arm_proto_joints = [j for j in joint_states if j.name.startswith("arm0")]
+                
+                # 2. Separate the 6 arm joints from the 1 gripper joint (f1x)
+                # This matches your logic: sorted(arm0 joints NOT ending in f1x)
+                arm_joints_only = sorted(
+                    [j for j in arm_proto_joints if not j.name.endswith("f1x")],
+                    key=lambda x: x.name
+                )
+                
+                # 3. Extract the numeric values (.value is required for Protobuf wrappers)
+                arm_joint_values = [j.position.value for j in arm_joints_only]
+                
+                # Return exactly the 6 arm joint angles
+                return arm_joint_values
+            else:
+                self.robot.logger.error(f"IK solver failed with status: {response.status}")
+                return None
+        except Exception as e:
+            self.robot.logger.error(f"IK request failed: {e}")
+            return None
 
     def send_feedback(self, feedback: dict[str, float]) -> None:
         # TODO: Implement force feedback
