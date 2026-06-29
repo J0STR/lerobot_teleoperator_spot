@@ -76,13 +76,10 @@ class SpotTeleop(Teleoperator):
             "arm.x": float,
             "arm.y": float,
             "arm.z": float,
-            "arm.rot.w": float,
-            "arm.rot.x": float,
-            "arm.rot.y": float,
-            "arm.rot.z": float,
+            "arm.rot.roll": float,
+            "arm.rot.pitch": float,
+            "arm.rot.yaw": float,
             "gripper.pos": float,
-            "arm_control": bool,
-            "arm_carry_enabled": bool,
         }
 
     @property
@@ -121,7 +118,8 @@ class SpotTeleop(Teleoperator):
             HAND_FRAME_NAME
         )
         curr_hand_quat = [body_tform_hand.rot.x, body_tform_hand.rot.y, body_tform_hand.rot.z, body_tform_hand.rot.w]
-
+        arm_quaternion = R.from_quat(curr_hand_quat)
+        roll, pitch, yaw = arm_quaternion.as_euler('xyz', degrees=False)
         action_dict = {
             "base.x.vel": 0.0,
             "base.y.vel": 0.0,
@@ -135,6 +133,9 @@ class SpotTeleop(Teleoperator):
             "arm.rot.x": body_tform_hand.rot.x,
             "arm.rot.y": body_tform_hand.rot.y,
             "arm.rot.z": body_tform_hand.rot.z,
+            "arm.rot.roll": roll,
+            "arm.rot.pitch": pitch,
+            "arm.rot.yaw": yaw,
             "gripper.pos": self.gripper_pos,
         }
 
@@ -203,14 +204,15 @@ class SpotTeleop(Teleoperator):
                     target_pos_abs = self.robot_pos_at_trigger + remap_pos_abs
                     target_rot_obj = self.rot_offset * remap_vr_curr_obj
                     target_quat = target_rot_obj.as_quat() # returns [x, y, z, w]
+                    roll, pitch, yaw = target_rot_obj.as_euler('xyz', degrees=False)
 
-                    ik_joints = self.get_joints_from_pose(
-                        target_pos_abs[0], target_pos_abs[1], target_pos_abs[2],
-                        target_quat[3], target_quat[0], target_quat[1], target_quat[2]
-                    )
-                    if ik_joints:
-                        for i, val in enumerate(ik_joints):
-                            action_dict[f"arm.joint{i+1}.pos"] = val
+                    # ik_joints = self.get_joints_from_pose(
+                    #     target_pos_abs[0], target_pos_abs[1], target_pos_abs[2],
+                    #     target_quat[3], target_quat[0], target_quat[1], target_quat[2]
+                    # )
+                    # if ik_joints:
+                    #     for i, val in enumerate(ik_joints):
+                    #         action_dict[f"arm.joint{i+1}.pos"] = val
 
                     action_dict["arm_control"] = True
                     action_dict["arm.x"] = target_pos_abs[0]
@@ -220,7 +222,11 @@ class SpotTeleop(Teleoperator):
                     action_dict["arm.rot.x"] = target_quat[0]
                     action_dict["arm.rot.y"] = target_quat[1]
                     action_dict["arm.rot.z"] = target_quat[2]
-                    action_dict["arm.rot.w"] = target_quat[3]       
+                    action_dict["arm.rot.w"] = target_quat[3]
+
+                    action_dict["arm.rot.roll"] = roll
+                    action_dict["arm.rot.pitch"] = pitch
+                    action_dict["arm.rot.yaw"] = yaw
             else:
                 # reset button state
                 self.button_already_pressed = False
